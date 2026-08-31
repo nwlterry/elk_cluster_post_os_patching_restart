@@ -1,0 +1,11 @@
+---
+# Copy to vault.yml and encrypt:
+#   cp group_vars/vault.yml.example group_vars/vault.yml
+#   ansible-vault encrypt group_vars/vault.yml
+#
+# Or inject a single string:
+#   ansible-vault encrypt_string 'YOUR_PASSWORD' --name vault_es_api_password
+#
+# vault.yml is gitignored. Do not commit plaintext credentials.
+
+vault_es_api_password: CHANGE_ME

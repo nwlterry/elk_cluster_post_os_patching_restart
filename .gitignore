@@ -1,0 +1,10 @@
+*.retry
+.vault_pass
+.vault_pass.txt
+group_vars/vault.yml
+*.pyc
+__pycache__/
+.idea/
+.vscode/
+*.swp
+.DS_Store
