@@ -1,0 +1,135 @@
+---
+# Included by each ES role play. Expects:
+#   es_url, is_data_node, es_node_name, reboot_host, health_* vars
+
+- name: "===== BEGIN {{ inventory_hostname }} ({{ es_node_name | default(inventory_hostname) }}) ====="
+  ansible.builtin.debug:
+    msg: "data_node={{ is_data_node }} reboot={{ reboot_host }}"
+
+- name: Wait until cluster is green before touching this node
+  ansible.builtin.uri:
+    url: "{{ es_url }}/_cluster/health?wait_for_status={{ health_wait_status }}&timeout=60s"
+    user: "{{ es_api_user }}"
+    password: "{{ es_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ es_api_validate_certs }}"
+    return_content: true
+    timeout: 90
+  register: h
+  until: h.status == 200 and h.json.status == health_wait_status
+  retries: "{{ health_retries }}"
+  delay: "{{ health_poll_delay }}"
+  delegate_to: localhost
+  become: false
+
+- name: Disable replica allocation (official rolling-restart step)
+  ansible.builtin.uri:
+    url: "{{ es_url }}/_cluster/settings"
+    method: PUT
+    user: "{{ es_api_user }}"
+    password: "{{ es_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ es_api_validate_certs }}"
+    body_format: json
+    body:
+      persistent:
+        cluster.routing.allocation.enable: "{{ allocation_disable_value }}"
+    status_code: [200]
+  delegate_to: localhost
+  become: false
+  when: is_data_node | bool
+
+- name: Reboot host after OS patch
+  ansible.builtin.reboot:
+    reboot_timeout: "{{ reboot_timeout }}"
+    pre_reboot_delay: "{{ reboot_pre_delay }}"
+    msg: "Ansible rolling restart after OS patching ({{ es_node_name | default(inventory_hostname) }})"
+  when: reboot_host | bool
+
+- name: Restart elasticsearch service only (no host reboot)
+  ansible.builtin.systemd:
+    name: "{{ es_service }}"
+    state: restarted
+  when: not (reboot_host | bool)
+
+- name: Wait for SSH after reboot
+  ansible.builtin.wait_for_connection:
+    timeout: "{{ reboot_timeout }}"
+  when: reboot_host | bool
+
+- name: Wait for elasticsearch HTTP port on this node
+  ansible.builtin.wait_for:
+    port: "{{ es_http_port }}"
+    host: "{{ ansible_host | default(inventory_hostname) }}"
+    delay: 10
+    timeout: 600
+  delegate_to: localhost
+  become: false
+
+- name: Wait until this node appears in _cat/nodes
+  ansible.builtin.uri:
+    url: "{{ es_url }}/_cat/nodes?h=name&format=json"
+    user: "{{ es_api_user }}"
+    password: "{{ es_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ es_api_validate_certs }}"
+    return_content: true
+    status_code: [200]
+  register: nodes_now
+  until: >
+    nodes_now.json
+    | map(attribute='name')
+    | list
+    | intersect([es_node_name | default(inventory_hostname), inventory_hostname])
+    | length > 0
+  retries: 60
+  delay: 10
+  delegate_to: localhost
+  become: false
+
+- name: Re-enable replica allocation
+  ansible.builtin.uri:
+    url: "{{ es_url }}/_cluster/settings"
+    method: PUT
+    user: "{{ es_api_user }}"
+    password: "{{ es_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ es_api_validate_certs }}"
+    body_format: json
+    body:
+      persistent:
+        cluster.routing.allocation.enable: null
+    status_code: [200]
+  delegate_to: localhost
+  become: false
+  when: is_data_node | bool
+
+- name: Wait for cluster green after this node
+  ansible.builtin.uri:
+    url: "{{ es_url }}/_cluster/health?wait_for_status={{ health_wait_status }}&timeout=60s{% if wait_for_no_relocating %}&wait_for_no_relocating_shards=true{% endif %}{% if wait_for_no_initializing %}&wait_for_no_initializing_shards=true{% endif %}"
+    user: "{{ es_api_user }}"
+    password: "{{ es_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ es_api_validate_certs }}"
+    return_content: true
+    timeout: 90
+  register: post_h
+  until:
+    - post_h.status == 200
+    - post_h.json.status == health_wait_status
+    - (not wait_for_no_relocating) or (post_h.json.relocating_shards | int == 0)
+    - (not wait_for_no_initializing) or (post_h.json.initializing_shards | int == 0)
+  retries: "{{ health_retries }}"
+  delay: "{{ health_poll_delay }}"
+  delegate_to: localhost
+  become: false
+
+- name: Show health after node
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} done —
+      status={{ post_h.json.status }}
+      nodes={{ post_h.json.number_of_nodes }}
+      unassigned={{ post_h.json.unassigned_shards }}
+      relocating={{ post_h.json.relocating_shards }}
+      initializing={{ post_h.json.initializing_shards }}

@@ -1,0 +1,92 @@
+---
+# Rolling reboot / service restart for non-ES edge nodes
+# (Fleet Server, APM/elastic-agent, Logstash, Kibana).
+#
+# Expects:
+#   edge_service, edge_port, edge_scheme (optional), edge_status_url (optional)
+#   es_url, reboot_host, health_*
+
+- name: "===== BEGIN {{ inventory_hostname }} service={{ edge_service }} port={{ edge_port }} ====="
+  ansible.builtin.debug:
+    msg: "reboot={{ reboot_host }} status_url={{ edge_status_url | default('none') }}"
+
+- name: Confirm ES is green before this edge node
+  ansible.builtin.uri:
+    url: "{{ es_url }}/_cluster/health?wait_for_status=green&timeout=60s"
+    user: "{{ es_api_user }}"
+    password: "{{ es_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ es_api_validate_certs }}"
+    return_content: true
+    timeout: 90
+    status_code: [200]
+  register: edge_es
+  until: edge_es.status == 200 and edge_es.json.status == 'green'
+  retries: 20
+  delay: 15
+  delegate_to: localhost
+  become: false
+
+- name: Reboot host after OS patch
+  ansible.builtin.reboot:
+    reboot_timeout: "{{ reboot_timeout }}"
+    pre_reboot_delay: "{{ reboot_pre_delay }}"
+    msg: "Ansible rolling restart after OS patching ({{ inventory_hostname }} / {{ edge_service }})"
+  when: reboot_host | bool
+
+- name: Restart service only (no host reboot)
+  ansible.builtin.systemd:
+    name: "{{ edge_service }}"
+    state: restarted
+  when: not (reboot_host | bool)
+
+- name: Wait for SSH after reboot
+  ansible.builtin.wait_for_connection:
+    timeout: "{{ reboot_timeout }}"
+  when: reboot_host | bool
+
+- name: Wait until the service unit is active
+  ansible.builtin.systemd:
+    name: "{{ edge_service }}"
+  register: edge_svc
+  until: edge_svc.status.ActiveState | default('') == 'active'
+  retries: 40
+  delay: 5
+
+- name: Wait for service port
+  ansible.builtin.wait_for:
+    port: "{{ edge_port }}"
+    host: "{{ ansible_host | default(inventory_hostname) }}"
+    delay: 5
+    timeout: "{{ edge_port_timeout | default(300) }}"
+  delegate_to: localhost
+  become: false
+  when: edge_port | int > 0
+
+- name: Wait for HTTP status endpoint
+  ansible.builtin.uri:
+    url: "{{ edge_status_url }}"
+    validate_certs: "{{ edge_validate_certs | default(false) }}"
+    status_code: "{{ edge_status_codes | default([200]) }}"
+    timeout: 30
+    return_content: true
+    user: "{{ edge_status_user | default(omit) }}"
+    password: "{{ edge_status_password | default(omit) }}"
+    force_basic_auth: "{{ true if edge_status_user is defined else omit }}"
+  register: edge_http
+  until: edge_http.status | default(0) in (edge_status_codes | default([200]))
+  retries: "{{ edge_status_retries | default(40) }}"
+  delay: 10
+  delegate_to: localhost
+  become: false
+  when: edge_status_url is defined and edge_status_url | length > 0
+  failed_when: false
+
+- name: Show edge node result
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} done —
+      service={{ edge_service }}
+      port={{ edge_port }}
+      http={{ edge_http.status | default('skipped') }}
+      es={{ edge_es.json.status }}
