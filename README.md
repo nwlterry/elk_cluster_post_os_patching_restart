@@ -1,0 +1,1 @@
+# elk_cluster_post_os_patching_restart
