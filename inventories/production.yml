@@ -1,0 +1,122 @@
+# Inventory — replace hostnames / IPs with your real nodes.
+#
+# Current cluster (must stay in sync with group_vars expected_topology):
+#   Master x 3 | Data Hot x 6 | Data Cold x 5 | ML x 2
+#   Fleet Server x 2 | APM (elastic-agent) x 2 | Logstash x 2 | Kibana x 2
+#
+# Restart / start order:
+#   1) es_masters  2) es_data_hot  3) es_data_cold  4) es_ml
+#   5) fleet       6) apm          7) logstash      8) kibana
+#
+# ansible_host can be FQDN or IP. es_node_name must match Elasticsearch node.name.
+
+all:
+  children:
+    es_masters:
+      hosts:
+        es-master-01:
+          ansible_host: 172.31.10.11
+          es_node_name: es-master-01
+        es-master-02:
+          ansible_host: 172.31.10.12
+          es_node_name: es-master-02
+        es-master-03:
+          ansible_host: 172.31.10.13
+          es_node_name: es-master-03
+
+    es_data_hot:
+      hosts:
+        es-hot-01:
+          ansible_host: 172.31.10.21
+          es_node_name: es-hot-01
+        es-hot-02:
+          ansible_host: 172.31.10.22
+          es_node_name: es-hot-02
+        es-hot-03:
+          ansible_host: 172.31.10.23
+          es_node_name: es-hot-03
+        es-hot-04:
+          ansible_host: 172.31.10.24
+          es_node_name: es-hot-04
+        es-hot-05:
+          ansible_host: 172.31.10.25
+          es_node_name: es-hot-05
+        es-hot-06:
+          ansible_host: 172.31.10.26
+          es_node_name: es-hot-06
+
+    es_data_cold:
+      hosts:
+        es-cold-01:
+          ansible_host: 172.31.10.31
+          es_node_name: es-cold-01
+        es-cold-02:
+          ansible_host: 172.31.10.32
+          es_node_name: es-cold-02
+        es-cold-03:
+          ansible_host: 172.31.10.33
+          es_node_name: es-cold-03
+        es-cold-04:
+          ansible_host: 172.31.10.34
+          es_node_name: es-cold-04
+        es-cold-05:
+          ansible_host: 172.31.10.35
+          es_node_name: es-cold-05
+
+    es_ml:
+      hosts:
+        es-ml-01:
+          ansible_host: 172.31.10.41
+          es_node_name: es-ml-01
+        es-ml-02:
+          ansible_host: 172.31.10.42
+          es_node_name: es-ml-02
+
+    fleet:
+      hosts:
+        fleet-01:
+          ansible_host: 172.31.10.61
+        fleet-02:
+          ansible_host: 172.31.10.62
+
+    apm:
+      hosts:
+        apm-01:
+          ansible_host: 172.31.10.71
+        apm-02:
+          ansible_host: 172.31.10.72
+
+    logstash:
+      hosts:
+        logstash-01:
+          ansible_host: 172.31.10.81
+        logstash-02:
+          ansible_host: 172.31.10.82
+
+    kibana:
+      hosts:
+        kibana-01:
+          ansible_host: 172.31.10.51
+        kibana-02:
+          ansible_host: 172.31.10.52
+
+    elasticsearch:
+      children:
+        es_masters:
+        es_data_hot:
+        es_data_cold:
+        es_ml:
+      vars:
+        es_service: elasticsearch
+
+    edge:
+      children:
+        fleet:
+        apm:
+        logstash:
+        kibana:
+
+    elk:
+      children:
+        elasticsearch:
+        edge:
