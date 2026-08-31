@@ -1,0 +1,369 @@
+---
+# Rolling OS-reboot / service restart for the full Elastic Stack.
+#
+# Official ES procedure:
+#   https://www.elastic.co/docs/deploy-manage/maintenance/start-stop-services/full-cluster-restart-rolling-restart-procedures
+#
+# Per data-bearing ES node:
+#   green -> allocation.enable=primaries -> reboot/restart -> node joins
+#   -> allocation.enable=null -> wait green + no relocating/initializing -> next
+#
+# Current cluster:
+#   Master x 3 | Data Hot x 6 | Data Cold x 5 | ML x 2
+#   Fleet Server x 2 | APM (elastic-agent) x 2 | Logstash x 2 | Kibana x 2
+#
+# Start / restart order:
+#   3 masters -> 6 hot -> 5 cold -> 2 ml
+#   -> 2 fleet -> 2 apm -> 2 logstash -> 2 kibana
+#
+#   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --ask-vault-pass
+#   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --tags precheck
+#   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --tags fleet,apm,logstash,kibana
+#   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml -e reboot_host=false
+
+- name: Pre-checks - cluster must be healthy before first node
+  hosts: localhost
+  gather_facts: false
+  tags: [precheck, always]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+  tasks:
+    - name: Cluster health
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_cluster/health"
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+        return_content: true
+        status_code: [200]
+      register: pre_health
+
+    - name: Show cluster health
+      ansible.builtin.debug:
+        msg: >-
+          status={{ pre_health.json.status }}
+          nodes={{ pre_health.json.number_of_nodes }}
+          data={{ pre_health.json.number_of_data_nodes }}
+          unassigned={{ pre_health.json.unassigned_shards }}
+          relocating={{ pre_health.json.relocating_shards }}
+          initializing={{ pre_health.json.initializing_shards }}
+
+    - name: Fail if cluster is not green
+      ansible.builtin.assert:
+        that:
+          - pre_health.json.status == 'green'
+        fail_msg: "Cluster is {{ pre_health.json.status }}, aborting rolling restart."
+      when: require_initial_green | bool
+
+    - name: Pending tasks
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_cat/pending_tasks?format=json"
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+        return_content: true
+      register: pending
+      when: fail_on_pending_tasks | bool
+
+    - name: Fail if pending cluster tasks exist
+      ansible.builtin.assert:
+        that:
+          - pending.json | length == 0
+        fail_msg: "Pending cluster tasks present: {{ pending.json }}"
+      when: fail_on_pending_tasks | bool
+
+    - name: Node list
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_cat/nodes?h=name,node.role,master,ip,heap.percent,disk.used_percent&format=json"
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+        return_content: true
+      register: cat_nodes
+
+    - name: Show nodes
+      ansible.builtin.debug:
+        var: cat_nodes.json
+
+    - name: Inventory must match expected topology
+      ansible.builtin.assert:
+        that:
+          - groups['es_masters'] | length == expected_topology.es_masters
+          - groups['es_data_hot'] | length == expected_topology.es_data_hot
+          - groups['es_data_cold'] | length == expected_topology.es_data_cold
+          - groups['es_ml'] | length == expected_topology.es_ml
+          - groups['fleet'] | length == expected_topology.fleet
+          - groups['apm'] | length == expected_topology.apm
+          - groups['logstash'] | length == expected_topology.logstash
+          - groups['kibana'] | length == expected_topology.kibana
+        fail_msg: >-
+          Inventory topology mismatch.
+          expected={{ expected_topology }}
+          inventory masters={{ groups['es_masters'] | length }}
+          hot={{ groups['es_data_hot'] | length }}
+          cold={{ groups['es_data_cold'] | length }}
+          ml={{ groups['es_ml'] | length }}
+          fleet={{ groups['fleet'] | length }}
+          apm={{ groups['apm'] | length }}
+          logstash={{ groups['logstash'] | length }}
+          kibana={{ groups['kibana'] | length }}
+        success_msg: >-
+          Inventory OK - master={{ expected_topology.es_masters }}
+          hot={{ expected_topology.es_data_hot }}
+          cold={{ expected_topology.es_data_cold }}
+          ml={{ expected_topology.es_ml }}
+          fleet={{ expected_topology.fleet }}
+          apm={{ expected_topology.apm }}
+          logstash={{ expected_topology.logstash }}
+          kibana={{ expected_topology.kibana }}
+
+    - name: Live cluster must have all 16 Elasticsearch nodes
+      ansible.builtin.assert:
+        that:
+          - pre_health.json.number_of_nodes | int == expected_es_nodes
+          - cat_nodes.json | length == expected_es_nodes
+        fail_msg: >-
+          Live ES node count is {{ pre_health.json.number_of_nodes }}
+          (cat={{ cat_nodes.json | length }}), expected {{ expected_es_nodes }}.
+          Do not start a rolling restart until every master/hot/cold/ML node is up.
+
+    - name: Enable ML upgrade_mode (pause jobs for the rolling window)
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_ml/set_upgrade_mode?enabled=true&timeout=5m"
+        method: POST
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+        return_content: true
+      when: ml_set_upgrade_mode | bool
+      register: ml_up
+      failed_when: false
+
+    - name: Warn if ML upgrade_mode call failed
+      ansible.builtin.debug:
+        msg: "ML set_upgrade_mode failed ({{ ml_up.status | default('n/a') }}). Jobs may migrate during ML node reboots."
+      when:
+        - ml_set_upgrade_mode | bool
+        - ml_up.status | default(0) != 200
+
+    - name: Flush indices (optional)
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_flush"
+        method: POST
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+      when: do_flush | bool
+
+
+- name: 1/8 Dedicated master nodes (Elastic start-first)
+  hosts: es_masters
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [elasticsearch, masters]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    is_data_node: false
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_es_node.yml
+
+
+- name: 2/8 Data hot nodes
+  hosts: es_data_hot
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [elasticsearch, hot]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    is_data_node: true
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_es_node.yml
+
+
+- name: 3/8 Data cold nodes
+  hosts: es_data_cold
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [elasticsearch, cold]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    is_data_node: true
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_es_node.yml
+
+
+- name: 4/8 ML nodes
+  hosts: es_ml
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [elasticsearch, ml]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    is_data_node: false
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_es_node.yml
+
+
+- name: 5/8 Fleet Server nodes (after ES is green)
+  hosts: fleet
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [edge, fleet]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    edge_service: "{{ fleet_service }}"
+    edge_port: "{{ fleet_port }}"
+    edge_status_url: "{{ fleet_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ fleet_port }}{{ fleet_status_path }}"
+    edge_validate_certs: "{{ fleet_validate_certs }}"
+    edge_status_codes: [200, 401]
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
+
+
+- name: 6/8 APM server nodes (elastic-agent)
+  hosts: apm
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [edge, apm]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    edge_service: "{{ apm_service }}"
+    edge_port: "{{ apm_port }}"
+    edge_status_url: "{{ apm_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ apm_port }}{{ apm_status_path }}"
+    edge_validate_certs: "{{ apm_validate_certs }}"
+    edge_status_codes: [200, 401]
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
+
+
+- name: 7/8 Logstash nodes
+  hosts: logstash
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [edge, logstash]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    edge_service: "{{ logstash_service }}"
+    edge_port: "{{ logstash_api_port }}"
+    edge_status_url: "{{ logstash_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ logstash_api_port }}{{ logstash_status_path }}"
+    edge_validate_certs: "{{ logstash_validate_certs }}"
+    edge_status_codes: [200]
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
+
+
+- name: 8/8 Kibana nodes
+  hosts: kibana
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [edge, kibana]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    edge_service: "{{ kibana_service }}"
+    edge_port: "{{ kibana_port }}"
+    edge_status_url: "{{ kibana_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ kibana_port }}{{ kibana_status_path }}"
+    edge_validate_certs: "{{ kibana_validate_certs }}"
+    edge_status_codes: [200]
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
+
+
+- name: Post-checks and restore ML jobs
+  hosts: localhost
+  gather_facts: false
+  tags: [postcheck]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+  tasks:
+    - name: Ensure allocation is fully re-enabled
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_cluster/settings"
+        method: PUT
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+        body_format: json
+        body:
+          persistent:
+            cluster.routing.allocation.enable: null
+        status_code: [200]
+
+    - name: Disable ML upgrade_mode (resume jobs)
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_ml/set_upgrade_mode?enabled=false&timeout=5m"
+        method: POST
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+      when: ml_set_upgrade_mode | bool
+      register: ml_down
+      failed_when: false
+
+    - name: Final cluster health
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_cluster/health"
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+        return_content: true
+      register: final_h
+
+    - name: Final node list
+      ansible.builtin.uri:
+        url: "{{ es_url }}/_cat/nodes?h=name,node.role,master,ip,uptime&format=json"
+        user: "{{ es_api_user }}"
+        password: "{{ es_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ es_api_validate_certs }}"
+        return_content: true
+      register: final_nodes
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "status={{ final_h.json.status }} nodes={{ final_h.json.number_of_nodes }} unassigned={{ final_h.json.unassigned_shards }}"
+          - "nodes={{ final_nodes.json | map(attribute='name') | list }}"
+          - "ML upgrade_mode restore status={{ ml_down.status | default('skipped') }}"
+
+    - name: Fail if final state is not green or node count drifted
+      ansible.builtin.assert:
+        that:
+          - final_h.json.status == 'green'
+          - final_h.json.unassigned_shards | int == 0
+          - final_h.json.number_of_nodes | int == expected_es_nodes
+        fail_msg: >-
+          Rolling restart finished but status={{ final_h.json.status }}
+          nodes={{ final_h.json.number_of_nodes }} (expected {{ expected_es_nodes }})
+          unassigned={{ final_h.json.unassigned_shards }}
