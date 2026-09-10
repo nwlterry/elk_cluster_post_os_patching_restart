@@ -1,0 +1,91 @@
+---
+# Disable Kibana alerting rules from nwlterry/elk_stack_monitor (and any
+# rule tagged maintenance-mute) so expected node-down during OS reboot
+# does not page Slack.
+#
+# Requires: kibana_api_* vars, stack_monitor_rule_names, stack_monitor_mute_tags
+
+- name: Kibana API base URL
+  ansible.builtin.set_fact:
+    kibana_api_url: "{{ kibana_api_scheme }}://{{ kibana_api_host }}:{{ kibana_api_port }}"
+
+- name: Find Kibana alerting rules
+  ansible.builtin.uri:
+    url: "{{ kibana_api_url }}/api/alerting/rules/_find?page=1&per_page=100"
+    method: GET
+    user: "{{ kibana_api_user }}"
+    password: "{{ kibana_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ kibana_api_validate_certs }}"
+    headers:
+      kbn-xsrf: "true"
+      Content-Type: application/json
+    return_content: true
+    status_code: [200]
+  register: kbn_rules
+  delegate_to: localhost
+  become: false
+  failed_when: false
+
+- name: Warn if Kibana rule lookup failed
+  ansible.builtin.debug:
+    msg: >-
+      Could not list Kibana rules (status={{ kbn_rules.status | default('n/a') }}).
+      Stack monitoring alerts may fire during the rolling reboot.
+      Check kibana_api_host / credentials. Continue because mute_stack_monitoring_fail_on_error=false.
+  when: kbn_rules.status | default(0) != 200
+
+- name: Fail if Kibana rule lookup failed and fail-on-error is set
+  ansible.builtin.fail:
+    msg: "Kibana /api/alerting/rules/_find returned {{ kbn_rules.status | default('n/a') }}"
+  when:
+    - mute_stack_monitoring_fail_on_error | bool
+    - kbn_rules.status | default(0) != 200
+
+- name: Build list of rules to disable
+  ansible.builtin.set_fact:
+    stack_monitor_rules_to_toggle: >-
+      {{ kbn_rules.json.data
+         | default([])
+         | selectattr('name', 'defined')
+         | select('ansible.builtin.search', '.*')
+         | list
+         | selectattr('name', 'in', stack_monitor_rule_names)
+         | list
+         + (kbn_rules.json.data | default([])
+            | selectattr('tags', 'defined')
+            | selectattr('tags', 'intersect', stack_monitor_mute_tags)
+            | list)
+      }}
+  when: kbn_rules.status | default(0) == 200
+
+- name: Deduplicate rules to disable
+  ansible.builtin.set_fact:
+    stack_monitor_rules_to_toggle: "{{ stack_monitor_rules_to_toggle | default([]) | unique(attribute='id') }}"
+  when: kbn_rules.status | default(0) == 200
+
+- name: Show rules that will be disabled for the OS-patch window
+  ansible.builtin.debug:
+    msg: >-
+      Muting {{ stack_monitor_rules_to_toggle | default([]) | length }} Kibana rule(s):
+      {{ stack_monitor_rules_to_toggle | default([]) | map(attribute='name') | list }}
+  when: kbn_rules.status | default(0) == 200
+
+- name: Disable stack monitoring rules
+  ansible.builtin.uri:
+    url: "{{ kibana_api_url }}/api/alerting/rule/{{ item.id }}/_disable"
+    method: POST
+    user: "{{ kibana_api_user }}"
+    password: "{{ kibana_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ kibana_api_validate_certs }}"
+    headers:
+      kbn-xsrf: "true"
+    status_code: [200, 204]
+  loop: "{{ stack_monitor_rules_to_toggle | default([]) }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.id }})"
+  delegate_to: localhost
+  become: false
+  failed_when: false
+  when: kbn_rules.status | default(0) == 200
