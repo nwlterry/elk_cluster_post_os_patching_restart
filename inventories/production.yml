@@ -2,12 +2,15 @@
 #
 # Current cluster (must stay in sync with group_vars expected_topology):
 #   Master x 3 | Data Hot x 6 | Data Cold x 5 | ML x 2
-#   Fleet Server x 2 | APM (OpenShift containers, check-only) x 2
+#   Fleet Server x 2
+#   APM RHEL elastic-agent x 2 (OS patch + restart)
+#   APM OpenShift elastic-agent x 2 (check-only, no OS patch)
 #   Logstash x 2 | Kibana x 2
 #
 # Restart / start order:
 #   1) es_masters  2) es_data_hot  3) es_data_cold  4) es_ml
-#   5) fleet       6) apm (health check only)  7) logstash  8) kibana
+#   5) fleet       6) apm_rhel     7) apm_openshift (check only)
+#   8) logstash    9) kibana
 #
 # ansible_host can be FQDN or IP. es_node_name must match Elasticsearch node.name.
 # For OpenShift APM, ansible_host should be the Service/Route that answers on apm_port.
@@ -81,18 +84,26 @@ all:
         fleet-02:
           ansible_host: 172.31.10.62
 
-    # Both APM servers run as containers on OpenShift. Ansible has no SSH/systemd
-    # on those pods; skip_restart keeps them in the inventory for health checks only.
     apm:
-      vars:
-        skip_restart: true
-        managed_platform: openshift
-        ansible_connection: local
-      hosts:
-        apm-01:
-          ansible_host: 172.31.10.71
-        apm-02:
-          ansible_host: 172.31.10.72
+      children:
+        apm_rhel:
+          hosts:
+            apm-01:
+              ansible_host: 172.31.10.71
+            apm-02:
+              ansible_host: 172.31.10.72
+        # OpenShift elastic-agent containers: no OS patch, no reboot/systemd.
+        apm_openshift:
+          vars:
+            skip_restart: true
+            managed_platform: openshift
+            ansible_connection: local
+            ansible_become: false
+          hosts:
+            apm-ocp-01:
+              ansible_host: 172.31.10.73
+            apm-ocp-02:
+              ansible_host: 172.31.10.74
 
     logstash:
       hosts:
