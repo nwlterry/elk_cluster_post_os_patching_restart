@@ -54,13 +54,14 @@ wait_for_no_initializing: true
 
 # Official rolling-restart allocation setting
 # primaries  = allow primary recovery, block replica relocation while a node is down
+# Does NOT stop indexing. Primaries keep accepting writes.
 allocation_disable_value: primaries
 
 # Optional: pause ML jobs for the whole rolling window (recommended with only 2 ML nodes)
 ml_set_upgrade_mode: true
 
-# Optional: flush before first node (speeds local primary recovery)
-do_flush: true
+# Indexing stays on for this OS-patch rolling restart.
+# Do not call POST /_flush and do not stop ingest (Logstash/Fleet/APM stay up until their own step).
 
 # Optional safety gates before starting
 require_initial_green: true
