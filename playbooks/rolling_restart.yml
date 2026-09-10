@@ -4,6 +4,9 @@
 # Official ES procedure:
 #   https://www.elastic.co/docs/deploy-manage/maintenance/start-stop-services/full-cluster-restart-rolling-restart-procedures
 #
+# Indexing stays on. This playbook does not stop ingest and does not POST /_flush.
+# allocation.enable=primaries only blocks replica relocation; primaries still accept writes.
+#
 # Per data-bearing ES node:
 #   green -> allocation.enable=primaries -> reboot/restart -> node joins
 #   -> allocation.enable=null -> wait green + no relocating/initializing -> next
@@ -157,16 +160,6 @@
       when:
         - ml_set_upgrade_mode | bool
         - ml_up.status | default(0) != 200
-
-    - name: Flush indices (optional)
-      ansible.builtin.uri:
-        url: "{{ es_url }}/_flush"
-        method: POST
-        user: "{{ es_api_user }}"
-        password: "{{ es_api_password }}"
-        force_basic_auth: true
-        validate_certs: "{{ es_api_validate_certs }}"
-      when: do_flush | bool
 
 
 - name: 1/9 Dedicated master nodes (Elastic start-first)
