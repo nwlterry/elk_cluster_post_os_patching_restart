@@ -3,14 +3,16 @@
 # Current cluster (must stay in sync with group_vars expected_topology):
 #   Master x 3 | Data Hot x 6 | Data Cold x 5 | ML x 2
 #   Fleet Server x 2
-#   APM RHEL elastic-agent x 2 (OS patch + restart)
+#   APM RHEL elastic-agent x 2 (OS patch + reboot)
 #   APM OpenShift elastic-agent x 2 (check-only, no OS patch)
 #   Logstash x 2 | Kibana x 2
 #
-# Restart / start order:
-#   1) es_masters  2) es_data_hot  3) es_data_cold  4) es_ml
-#   5) fleet       6) apm_rhel     7) apm_openshift (check only)
-#   8) logstash    9) kibana
+# Official Elastic upgrade / rolling-restart order (no POST /_flush):
+#   https://www.elastic.co/docs/deploy-manage/upgrade/deployment-or-cluster/elasticsearch
+#   https://www.elastic.co/docs/deploy-manage/upgrade/plan-upgrade
+#   1) es_data_cold  2) es_data_hot  3) es_ml  4) es_masters
+#   5) kibana        6) fleet        7) apm_rhel  8) apm_openshift (check only)
+#   9) logstash
 #
 # ansible_host can be FQDN or IP. es_node_name must match Elasticsearch node.name.
 # For OpenShift APM, ansible_host should be the Service/Route that answers on apm_port.
@@ -92,7 +94,6 @@ all:
               ansible_host: 172.31.10.71
             apm-02:
               ansible_host: 172.31.10.72
-        # OpenShift elastic-agent containers: no OS patch, no reboot/systemd.
         apm_openshift:
           vars:
             skip_restart: true
