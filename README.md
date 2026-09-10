@@ -6,7 +6,27 @@ https://github.com/nwlterry/elk_cluster_post_os_patching_restart
 
 Automates the official Elasticsearch rolling-restart procedure, then rolls Fleet Server, APM on RHEL, Logstash, and Kibana one host at a time. Two APM servers run as OpenShift `elastic-agent` containers and are **health-checked only** (no OS patch, no reboot, no systemd).
 
+**Azure DevOps Server wiki source (paste-ready):** [docs/AZURE_DEVOPS_WIKI.md](docs/AZURE_DEVOPS_WIKI.md)
+
 Reference: [Full-cluster restart and rolling restart procedures](https://www.elastic.co/docs/deploy-manage/maintenance/start-stop-services/full-cluster-restart-rolling-restart-procedures)
+
+## Restart sequence
+
+`3 masters → 6 hot → 5 cold → 2 ML → 2 Fleet → 2 APM RHEL → 2 APM OpenShift (check only) → 2 Logstash → 2 Kibana`
+
+| Step | Group | Count | Action |
+|------|-------|-------|--------|
+| 1 | `es_masters` | 3 | Reboot/restart ES |
+| 2 | `es_data_hot` | 6 | Allocation disable, reboot/restart ES, wait green |
+| 3 | `es_data_cold` | 5 | Same as hot |
+| 4 | `es_ml` | 2 | Reboot/restart ES; jobs paused via `_ml/set_upgrade_mode` |
+| 5 | `fleet` | 2 | Reboot/restart `elastic-agent` |
+| 6 | `apm_rhel` | 2 | Reboot/restart `elastic-agent` on RHEL VMs |
+| 7 | `apm_openshift` | 2 | Port/HTTP check only — no OS patch |
+| 8 | `logstash` | 2 | Reboot/restart Logstash |
+| 9 | `kibana` | 2 | Reboot/restart Kibana |
+
+`--tags apm` runs both APM plays. `--tags apm_rhel` or `--tags apm_openshift` selects one side.
 
 ## Current cluster
 
@@ -40,22 +60,6 @@ The playbook does **not** discover nodes from Elasticsearch and reboot whatever 
 
 `ansible.cfg` sets `inventory = inventories/production.yml`.
 
-## Node order
-
-| Step | Group | Count | Action |
-|------|-------|-------|--------|
-| 1 | `es_masters` | 3 | Reboot/restart ES |
-| 2 | `es_data_hot` | 6 | Allocation disable, reboot/restart ES, wait green |
-| 3 | `es_data_cold` | 5 | Same as hot |
-| 4 | `es_ml` | 2 | Reboot/restart ES; jobs paused via `_ml/set_upgrade_mode` |
-| 5 | `fleet` | 2 | Reboot/restart `elastic-agent` |
-| 6 | `apm_rhel` | 2 | Reboot/restart `elastic-agent` on RHEL VMs |
-| 7 | `apm_openshift` | 2 | Port/HTTP check only — no OS patch |
-| 8 | `logstash` | 2 | Reboot/restart Logstash |
-| 9 | `kibana` | 2 | Reboot/restart Kibana |
-
-`--tags apm` runs both APM plays. `--tags apm_rhel` or `--tags apm_openshift` selects one side.
-
 ## Layout
 
 ```
@@ -65,9 +69,10 @@ The playbook does **not** discover nodes from Elasticsearch and reboot whatever 
 ├── group_vars/all.yml
 ├── group_vars/vault.yml.example
 ├── playbooks/rolling_restart.yml
-└── playbooks/tasks/
-    ├── restart_es_node.yml
-    └── restart_edge_node.yml
+├── playbooks/tasks/
+│   ├── restart_es_node.yml
+│   └── restart_edge_node.yml
+└── docs/AZURE_DEVOPS_WIKI.md
 ```
 
 ## Before first run
