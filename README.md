@@ -6,18 +6,6 @@ https://github.com/nwlterry/elk_cluster_post_os_patching_restart
 
 Automates the official Elasticsearch rolling-restart procedure, then rolls Fleet Server, Logstash, and Kibana one host at a time. Both APM servers run as OpenShift containers and are **health-checked only** (no reboot, no systemd).
 
-ES data-node loop:
-
-1. Cluster must be **green**
-2. On each **data** node: `cluster.routing.allocation.enable = primaries`
-3. Reboot the host (or restart the service)
-4. Wait until the node rejoins `_cat/nodes`
-5. Clear `allocation.enable` (back to default)
-6. Wait for **green** and no relocating / initializing shards
-7. Next node
-
-Edge nodes wait for ES green, reboot/restart their own systemd unit, then wait for port + optional HTTP status. Hosts with `skip_restart: true` skip reboot and systemd and only run the port/HTTP check (APM on OpenShift).
-
 Reference: [Full-cluster restart and rolling restart procedures](https://www.elastic.co/docs/deploy-manage/maintenance/start-stop-services/full-cluster-restart-rolling-restart-procedures)
 
 ## Current cluster
@@ -36,20 +24,100 @@ Reference: [Full-cluster restart and rolling restart procedures](https://www.ela
 
 Precheck fails if inventory sizes or live `_cluster/health.number_of_nodes` (ES only = 16) do not match. Counts live in `group_vars/all.yml` (`expected_topology`).
 
-## Node order
+## How host information is collected
 
-Elastic dedicated-master-first start sequence, then ingest / UI that depend on a green cluster:
+The playbook does **not** discover nodes from Elasticsearch and reboot whatever it finds. The reboot list is the static inventory. Elasticsearch is used only to **validate** those names and health.
 
-| Step | Group | Count | Allocation disable | Notes |
-|------|-------|-------|--------------------|-------|
-| 1 | `es_masters` | 3 | no | Quorum stays 2/3 |
-| 2 | `es_data_hot` | 6 | yes | Wait green after every node |
-| 3 | `es_data_cold` | 5 | yes | Same |
-| 4 | `es_ml` | 2 | no | Jobs paused via `_ml/set_upgrade_mode` |
-| 5 | `fleet` | 2 | n/a | After ES green; agents enroll here |
-| 6 | `apm` | 2 | n/a | OpenShift containers — port/HTTP check only |
-| 7 | `logstash` | 2 | n/a | Writes to ES; keep one up |
-| 8 | `kibana` | 2 | n/a | UI last |
+| Field | File | Purpose |
+|-------|------|--------|
+| `inventory_hostname` | `inventories/production.yml` key | Ansible target name (`es-hot-01`, `apm-01`, …) |
+| `ansible_host` | same file | SSH target for VMs; TCP/HTTP target for port checks |
+| `es_node_name` | same file, ES hosts only | Must equal Elasticsearch `node.name` in `_cat/nodes` |
+| `es_api_host` | `group_vars/all.yml` | Cluster API used for all health/allocation/ML calls |
+| `expected_topology` / `expected_es_nodes` | `group_vars/all.yml` | Counts the precheck asserts against inventory and live ES |
+| `skip_restart` / `ansible_connection: local` | `apm` group | No SSH into OpenShift pods; check Service/Route only |
+
+`ansible.cfg` sets `inventory = inventories/production.yml`.
+
+Live collection during precheck and each ES node:
+
+1. `GET /_cluster/health` on `es_api_host` — status, node counts, unassigned/relocating/initializing.
+2. `GET /_cat/nodes?h=name,...` — live ES names. Rejoin wait intersects this list with `[es_node_name, inventory_hostname]`.
+3. Inventory group lengths vs `expected_topology`.
+4. `number_of_nodes` and `_cat/nodes` length must equal `expected_es_nodes` (16). Edge hosts are not in that number.
+
+If `node.name` in `elasticsearch.yml` does not match `es_node_name`, the host reboots but the `_cat/nodes` wait times out.
+
+APM is not looked up via `oc` or `_cat/nodes`. Set `ansible_host` to the OpenShift Service or Route that answers on `apm_port`.
+
+```
+inventory YAML  ──►  groups + ansible_host + es_node_name
+        │
+        ▼
+precheck (localhost)  ──  _cluster/health + _cat/nodes  vs  expected_topology
+        │
+        ▼
+serial: 1 per group, order: inventory
+  ES     SSH ansible_host → reboot/restart
+         localhost wait TCP on ansible_host
+         localhost wait es_node_name in _cat/nodes
+         data nodes: allocation primaries → null + green
+  Fleet / Logstash / Kibana  SSH + own port/HTTP
+  APM    localhost port/HTTP only (skip_restart)
+        │
+        ▼
+postcheck  allocation on, ML jobs on, 16 ES nodes, green
+```
+
+## Node order and per-node flow
+
+Same-version OS-patch restart uses dedicated-master-first so quorum is stable before data nodes move. (Elastic *version-upgrade* order is data tiers first and masters last; this repo is not that path.)
+
+| Step | Group | Count | Allocation disable | Action |
+|------|-------|-------|--------------------|--------|
+| 1 | `es_masters` | 3 | no | Reboot/restart ES |
+| 2 | `es_data_hot` | 6 | yes | Reboot/restart ES |
+| 3 | `es_data_cold` | 5 | yes | Reboot/restart ES |
+| 4 | `es_ml` | 2 | no | Reboot/restart ES; jobs paused via `_ml/set_upgrade_mode` |
+| 5 | `fleet` | 2 | n/a | Reboot/restart `elastic-agent` |
+| 6 | `apm` | 2 | n/a | OpenShift — port/HTTP check only |
+| 7 | `logstash` | 2 | n/a | Reboot/restart Logstash |
+| 8 | `kibana` | 2 | n/a | Reboot/restart Kibana |
+
+### Precheck (`hosts: localhost`)
+
+1. Cluster must be green (`require_initial_green`).
+2. Optional fail on `_cat/pending_tasks`.
+3. Print `_cat/nodes`.
+4. Assert inventory sizes and 16 live ES nodes.
+5. Optional `POST /_ml/set_upgrade_mode?enabled=true`.
+6. Optional `POST /_flush`.
+
+### Each Elasticsearch node (`tasks/restart_es_node.yml`)
+
+1. Wait green on the cluster API.
+2. Data nodes only: `cluster.routing.allocation.enable = primaries`.
+3. Reboot the host (`reboot_host: true`) or `systemctl restart elasticsearch`.
+4. Wait SSH if rebooted.
+5. Wait TCP `es_http_port` on `ansible_host` from localhost.
+6. Poll `_cat/nodes` until `es_node_name` appears.
+7. Data nodes only: `allocation.enable = null`.
+8. Wait green and no relocating/initializing shards.
+9. Next host (`serial: 1`).
+
+### Each edge node (`tasks/restart_edge_node.yml`)
+
+1. Wait ES green.
+2. If `skip_restart` (APM): skip reboot and systemd.
+3. Else reboot or restart `edge_service`.
+4. Wait service port and optional HTTP status from localhost (`200` or `401` for Fleet/APM).
+
+### Postcheck (`hosts: localhost`)
+
+1. Force `allocation.enable: null`.
+2. `POST /_ml/set_upgrade_mode?enabled=false`.
+3. Final health + `_cat/nodes`.
+4. Fail unless green, 0 unassigned, 16 ES nodes.
 
 ## Layout
 
@@ -116,7 +184,8 @@ ansible-playbook playbooks/rolling_restart.yml --tags edge --ask-vault-pass
 - It does **not** apply the OS patches. Run the patch playbook first, then this.
 - It does **not** take snapshots.
 - It does **not** use the node shutdown API (`PUT _nodes/{id}/shutdown`). That API is documented for ECE/ECK, not self-managed operators.
-- It does **not** restart OpenShift APM pods. Set `skip_restart: true` (already set on the `apm` group).
+- It does **not** discover hosts from `_cat/nodes` or from the OpenShift API.
+- It does **not** restart OpenShift APM pods. `skip_restart: true` is set on the `apm` group.
 - Fleet / APM HTTP status checks treat `401` as “process is up” because those endpoints are often auth-gated.
 
 ## Tuning
