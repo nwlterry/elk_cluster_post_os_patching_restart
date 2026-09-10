@@ -4,7 +4,12 @@ Ansible rolling **host reboot** for a self-managed Elastic Stack after monthly O
 
 https://github.com/nwlterry/elk_cluster_post_os_patching_restart
 
-Stack monitoring rules live in https://github.com/nwlterry/elk_stack_monitor (node-down + disk → Slack). This playbook **disables** those Kibana rules before the first reboot and **enables** them again after all 16 ES nodes are green.
+Cluster-status rules live in https://github.com/nwlterry/elk_stack_monitor:
+
+- `elk_cluster_status-informational.json` → `CC | Elasticsearch | Cluster Status ( Informational )`
+- `elk_cluster_status-warning.json` → `DevOps | Elasticsearch | Cluster Status ( Warning )` (cluster **red**)
+
+This playbook **disables** those Kibana rules before the first reboot and **enables** them again after all 16 ES nodes are green.
 
 Two APM servers run as OpenShift `elastic-agent` containers and are **health-checked only** (no OS patch, no reboot).
 
@@ -18,7 +23,7 @@ Indexing stays on. No `POST /_flush`.
 
 | Step | Group | Count | Action |
 |------|-------|-------|--------|
-| Pre | localhost | — | Green + 16 ES nodes; mute `elk_stack_monitor` / `maintenance-mute` rules |
+| Pre | localhost | — | Green + 16 ES nodes; mute cluster-status rules |
 | 1 | `es_masters` | 3 | **Reboot host** |
 | 2 | `es_data_hot` | 6 | Allocation disable, **reboot host**, wait green |
 | 3 | `es_data_cold` | 5 | Same as hot |
@@ -34,19 +39,18 @@ Every RHEL play sets `reboot_host: true` because OS patching requires a reboot. 
 
 ## Stack monitoring
 
-Rules from [elk_stack_monitor](https://github.com/nwlterry/elk_stack_monitor):
+Muted by exact Kibana name (`stack_monitor_rule_names`) or tag `maintenance-mute`:
 
-- `Elasticsearch Node Monitoring Alert` (disk > 85%)
-- `Elasticsearch Node Down Alert` (cardinality of `elasticsearch.node.name` < 16)
-- Optional built-ins: Elasticsearch nodes changed, Missing monitoring data, Elasticsearch cluster status
-
-Matched by exact name (`stack_monitor_rule_names`) or tag `maintenance-mute`.
+| File | Kibana name |
+|------|-------------|
+| `elk_cluster_status-informational.json` | `CC \| Elasticsearch \| Cluster Status ( Informational )` |
+| `elk_cluster_status-warning.json` | `DevOps \| Elasticsearch \| Cluster Status ( Warning )` |
 
 ```bash
 ansible-playbook playbooks/rolling_restart.yml --tags unmute --ask-vault-pass
 ```
 
-Set `kibana_api_host` in `group_vars/all.yml` to a Kibana URL that stays reachable (or comes back after play 9/9).
+Set `kibana_api_host` in `group_vars/all.yml`.
 
 ## Current cluster
 
