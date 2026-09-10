@@ -1,0 +1,37 @@
+{
+  "name": "CC | Elasticsearch | Cluster Status ( Informational )",
+  "tags": [
+    "Elasticsearch",
+    "Monitoring",
+    "Infrastructure",
+    "Informational",
+    "maintenance-mute"
+  ],
+  "schedule": {
+    "interval": "1m"
+  },
+  "params": {
+    "timeField": "@timestamp",
+    "index": [
+      ".ds-metrics-elasticsearch.stack_monitoring.cluster_stats-default*"
+    ],
+    "esQuery": "{\n    \"query\":{\n      \"match_all\" : {}\n    }\n  }",
+    "size": 100,
+    "thresholdComparator": ">",
+    "timeWindowSize": 5,
+    "timeWindowUnit": "m",
+    "threshold": [
+      5
+    ],
+    "aggType": "count",
+    "groupBy": "all",
+    "termSize": 5,
+    "searchType": "esQuery",
+    "excludeHitsFromPreviousRun": true,
+    "sourceFields": []
+  },
+  "actions": [],
+  "alert_delay": {
+    "active": 1
+  }
+}
