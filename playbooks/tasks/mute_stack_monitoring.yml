@@ -32,7 +32,7 @@
     msg: >-
       Could not list Kibana rules (status={{ kbn_rules.status | default('n/a') }}).
       Stack monitoring alerts may fire during the rolling reboot.
-      Check kibana_api_host / credentials. Continue because mute_stack_monitoring_fail_on_error=false.
+      Check kibana_api_host / credentials.
   when: kbn_rules.status | default(0) != 200
 
 - name: Fail if Kibana rule lookup failed and fail-on-error is set
@@ -42,36 +42,7 @@
     - mute_stack_monitoring_fail_on_error | bool
     - kbn_rules.status | default(0) != 200
 
-- name: Build list of rules to disable
-  ansible.builtin.set_fact:
-    stack_monitor_rules_to_toggle: >-
-      {{ kbn_rules.json.data
-         | default([])
-         | selectattr('name', 'defined')
-         | select('ansible.builtin.search', '.*')
-         | list
-         | selectattr('name', 'in', stack_monitor_rule_names)
-         | list
-         + (kbn_rules.json.data | default([])
-            | selectattr('tags', 'defined')
-            | selectattr('tags', 'intersect', stack_monitor_mute_tags)
-            | list)
-      }}
-  when: kbn_rules.status | default(0) == 200
-
-- name: Deduplicate rules to disable
-  ansible.builtin.set_fact:
-    stack_monitor_rules_to_toggle: "{{ stack_monitor_rules_to_toggle | default([]) | unique(attribute='id') }}"
-  when: kbn_rules.status | default(0) == 200
-
-- name: Show rules that will be disabled for the OS-patch window
-  ansible.builtin.debug:
-    msg: >-
-      Muting {{ stack_monitor_rules_to_toggle | default([]) | length }} Kibana rule(s):
-      {{ stack_monitor_rules_to_toggle | default([]) | map(attribute='name') | list }}
-  when: kbn_rules.status | default(0) == 200
-
-- name: Disable stack monitoring rules
+- name: Disable matching stack monitoring rules
   ansible.builtin.uri:
     url: "{{ kibana_api_url }}/api/alerting/rule/{{ item.id }}/_disable"
     method: POST
@@ -82,10 +53,25 @@
     headers:
       kbn-xsrf: "true"
     status_code: [200, 204]
-  loop: "{{ stack_monitor_rules_to_toggle | default([]) }}"
+  loop: "{{ kbn_rules.json.data | default([]) }}"
   loop_control:
-    label: "{{ item.name }} ({{ item.id }})"
+    label: "{{ item.name | default(item.id) }}"
+  when:
+    - kbn_rules.status | default(0) == 200
+    - item.name in stack_monitor_rule_names or ((item.tags | default([])) | intersect(stack_monitor_mute_tags) | length > 0)
   delegate_to: localhost
   become: false
   failed_when: false
+  register: mute_each
+
+- name: Show muted rule names
+  ansible.builtin.debug:
+    msg: >-
+      Disabled rules for OS-patch window:
+      {{ kbn_rules.json.data | default([])
+         | selectattr('name', 'defined')
+         | map(attribute='name')
+         | select('in', stack_monitor_rule_names)
+         | list }}
+      (plus any rule tagged {{ stack_monitor_mute_tags }})
   when: kbn_rules.status | default(0) == 200
