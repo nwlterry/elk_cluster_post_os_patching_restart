@@ -1,0 +1,37 @@
+{
+  "name": "DevOps | Elasticsearch | Cluster Status ( Warning )",
+  "tags": [
+    "Elasticsearch",
+    "Monitoring",
+    "Infrastructure",
+    "Warning",
+    "maintenance-mute"
+  ],
+  "schedule": {
+    "interval": "1m"
+  },
+  "params": {
+    "searchType": "esQuery",
+    "timeWindowSize": 5,
+    "timeWindowUnit": "m",
+    "threshold": [
+      1
+    ],
+    "thresholdComparator": ">",
+    "size": 100,
+    "esQuery": "{\n    \"query\":{\n      \"bool\": {\n        \"filter\": [\n          {\n            \"range\": {\n              \"@timestamp\": {\n                \"gte\": \"now-5m\",\n                \"lte\": \"now\"\n              }\n            }\n          },\n          {\n            \"bool\": {\n              \"should\": [\n                {\n                  \"match\": {\n                    \"elasticsearch.cluster.stats.status\": \"red\"\n                  }\n                }\n              ]\n            }\n          }\n        ]\n      }\n    }\n  }",
+    "aggType": "count",
+    "groupBy": "all",
+    "termSize": 5,
+    "excludeHitsFromPreviousRun": true,
+    "sourceFields": [],
+    "index": [
+      ".ds-metrics-elasticsearch.stack_monitoring.cluster_stats-default*"
+    ],
+    "timeField": "@timestamp"
+  },
+  "actions": [],
+  "alert_delay": {
+    "active": 1
+  }
+}
