@@ -11,7 +11,7 @@ This is a **same-version OS-patch rolling host reboot**. It is not an Elasticsea
 
 **OS patching requires a host reboot** on every RHEL VM. OpenShift APM containers are check-only.
 
-**Stack monitoring:** before the first reboot the playbook disables Kibana rules from `elk_stack_monitor` (node-down, disk > 85%, plus built-ins listed below) so Slack is not paged for an expected node leave. After the cluster is green with 16 ES nodes, those rules are enabled again.
+**Stack monitoring:** before the first reboot the playbook disables the two cluster-status rules exported as `elk_cluster_status-informational.json` and `elk_cluster_status-warning.json`. After the cluster is green with 16 ES nodes, those rules are enabled again.
 
 ---
 
@@ -21,7 +21,7 @@ One host at a time (`serial: 1`). `reboot_host: true` on every RHEL play.
 
 | Step | Play | Group | Count | Action |
 |------|------|-------|-------|--------|
-| Pre | Pre-checks | localhost | — | Green, 16 ES nodes, mute monitoring rules. No flush. |
+| Pre | Pre-checks | localhost | — | Green, 16 ES nodes, mute cluster-status rules. No flush. |
 | 1/9 | Masters | `es_masters` | 3 | **Reboot host** |
 | 2/9 | Data hot | `es_data_hot` | 6 | Allocation `primaries` → **reboot host** → rejoin → allocation on → green |
 | 3/9 | Data cold | `es_data_cold` | 5 | Same as hot |
@@ -32,7 +32,7 @@ One host at a time (`serial: 1`). `reboot_host: true` on every RHEL play.
 | 8/9 | Logstash | `logstash` | 2 | **Reboot host**, check :9600 |
 | 9/9 | Kibana | `kibana` | 2 | **Reboot host**, check :5601 |
 | Post | Post-checks | localhost | — | Allocation on, ML jobs on, green, 16 nodes |
-| Post | Unmute | localhost | — | Re-enable stack monitoring rules |
+| Post | Unmute | localhost | — | Re-enable cluster-status rules |
 
 **Compact order:**
 
@@ -44,13 +44,10 @@ One host at a time (`serial: 1`). `reboot_host: true` on every RHEL play.
 
 Source: https://github.com/nwlterry/elk_stack_monitor
 
-| Rule name | Fires when |
-|-----------|------------|
-| Elasticsearch Node Monitoring Alert | Disk used % > 85 per node (5m) |
-| Elasticsearch Node Down Alert | Distinct `elasticsearch.node.name` in `metrics-elasticsearch.stack_monitoring*` < 16 (5m) |
-| Elasticsearch nodes changed | Built-in Stack Monitoring |
-| Missing monitoring data | Built-in Stack Monitoring |
-| Elasticsearch cluster status | Built-in Stack Monitoring |
+| File | Kibana rule name | Fires when |
+|------|------------------|------------|
+| `elk_cluster_status-informational.json` | `CC \| Elasticsearch \| Cluster Status ( Informational )` | Query count on `.ds-metrics-elasticsearch.stack_monitoring.cluster_stats-default*` |
+| `elk_cluster_status-warning.json` | `DevOps \| Elasticsearch \| Cluster Status ( Warning )` | `elasticsearch.cluster.stats.status` is **red** (last 5m) |
 
 Match method: exact name in `stack_monitor_rule_names` **or** tag `maintenance-mute`.
 
@@ -92,5 +89,5 @@ ansible-playbook playbooks/rolling_restart.yml --tags unmute --ask-vault-pass
 
 1. `_cluster/health` and `_cluster/settings`. If allocation is still `primaries`, set it to `null`.
 2. `POST _ml/set_upgrade_mode?enabled=false`
-3. `--tags unmute` so Slack node-down is not left disabled.
+3. `--tags unmute` so the cluster-status rules are not left disabled.
 4. Resume with `--tags hot --limit es-hot-04` (etc.).
