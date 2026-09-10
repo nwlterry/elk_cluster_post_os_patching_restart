@@ -5,23 +5,25 @@
 #   Data cold                 x 5
 #   ML                        x 2
 #   Fleet Server              x 2
-#   APM (OpenShift containers, check-only) x 2
+#   APM RHEL elastic-agent    x 2   (OS patch + restart)
+#   APM OpenShift containers  x 2   (check-only)
 #   Logstash                  x 2
 #   Kibana                    x 2
-# Total: 16 Elasticsearch + 8 edge inventory entries = 24
-# APM entries are not rebooted; they stay in inventory for port/HTTP checks.
+# Total: 16 Elasticsearch + 10 edge inventory entries = 26
 expected_topology:
   es_masters: 3
   es_data_hot: 6
   es_data_cold: 5
   es_ml: 2
   fleet: 2
-  apm: 2
+  apm: 4
+  apm_rhel: 2
+  apm_openshift: 2
   logstash: 2
   kibana: 2
 expected_es_nodes: 16          # masters + hot + cold + ml
-expected_edge_nodes: 8         # fleet + apm + logstash + kibana
-expected_total_hosts: 24
+expected_edge_nodes: 10        # fleet + apm(4) + logstash + kibana
+expected_total_hosts: 26
 
 # Cluster API endpoint used for health / allocation / ML calls.
 # Point this at a VIP, load balancer, or a master that is NOT the node being rebooted
@@ -40,7 +42,7 @@ es_ca_path: ""   # set to /etc/elasticsearch/certs/ca.crt if you validate TLS
 reboot_host: true                 # false = only restart the component service
 reboot_timeout: 900               # seconds to wait for SSH after reboot
 reboot_pre_delay: 15
-skip_restart: false               # per-host/group override; APM OpenShift set true
+skip_restart: false               # per-host/group override; apm_openshift set true
 
 # Cluster wait
 health_wait_status: green
@@ -77,8 +79,8 @@ fleet_scheme: https
 fleet_status_path: /api/status
 fleet_validate_certs: false
 
-# APM Server hosted on OpenShift (containers). Playbook never reboots these.
-# ansible_host in inventory must be the Service/Route that answers on apm_port.
+# APM via Elastic Agent (RHEL VMs and OpenShift containers share port/status).
+# OpenShift hosts use skip_restart; ansible_host must be the Service/Route.
 apm_service: elastic-agent
 apm_port: 8200
 apm_scheme: http
