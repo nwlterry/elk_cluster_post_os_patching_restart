@@ -10,11 +10,12 @@
 #
 # Current cluster:
 #   Master x 3 | Data Hot x 6 | Data Cold x 5 | ML x 2
-#   Fleet Server x 2 | APM (elastic-agent) x 2 | Logstash x 2 | Kibana x 2
+#   Fleet Server x 2 | APM (OpenShift containers, check-only) x 2
+#   Logstash x 2 | Kibana x 2
 #
 # Start / restart order:
 #   3 masters -> 6 hot -> 5 cold -> 2 ml
-#   -> 2 fleet -> 2 apm -> 2 logstash -> 2 kibana
+#   -> 2 fleet -> 2 apm (health check only) -> 2 logstash -> 2 kibana
 #
 #   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --ask-vault-pass
 #   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --tags precheck
@@ -240,16 +241,18 @@
     - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
 
 
-- name: 6/8 APM server nodes (elastic-agent)
+- name: 6/8 APM servers on OpenShift (health check only, no restart)
   hosts: apm
   serial: 1
   any_errors_fatal: true
-  become: true
-  gather_facts: true
+  become: false
+  gather_facts: false
   order: inventory
   tags: [edge, apm]
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    skip_restart: true
+    managed_platform: openshift
     edge_service: "{{ apm_service }}"
     edge_port: "{{ apm_port }}"
     edge_status_url: "{{ apm_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ apm_port }}{{ apm_status_path }}"
