@@ -5,10 +5,15 @@
 # Expects:
 #   edge_service, edge_port, edge_scheme (optional), edge_status_url (optional)
 #   es_url, reboot_host, health_*
+#   skip_restart: true  -> do not reboot or restart systemd; HTTP/port check only
+#                          (OpenShift / container APM, managed outside this playbook)
 
 - name: "===== BEGIN {{ inventory_hostname }} service={{ edge_service }} port={{ edge_port }} ====="
   ansible.builtin.debug:
-    msg: "reboot={{ reboot_host }} status_url={{ edge_status_url | default('none') }}"
+    msg: >-
+      reboot={{ reboot_host }} skip_restart={{ skip_restart | default(false) }}
+      platform={{ managed_platform | default('host') }}
+      status_url={{ edge_status_url | default('none') }}
 
 - name: Confirm ES is green before this edge node
   ansible.builtin.uri:
@@ -27,23 +32,36 @@
   delegate_to: localhost
   become: false
 
+- name: Skip host reboot and systemd restart (OpenShift / container-managed)
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} is {{ managed_platform | default('container') }}-managed
+      (skip_restart=true). Checking reachability only; no reboot or systemd restart.
+  when: skip_restart | default(false) | bool
+
 - name: Reboot host after OS patch
   ansible.builtin.reboot:
     reboot_timeout: "{{ reboot_timeout }}"
     pre_reboot_delay: "{{ reboot_pre_delay }}"
     msg: "Ansible rolling restart after OS patching ({{ inventory_hostname }} / {{ edge_service }})"
-  when: reboot_host | bool
+  when:
+    - reboot_host | bool
+    - not (skip_restart | default(false) | bool)
 
 - name: Restart service only (no host reboot)
   ansible.builtin.systemd:
     name: "{{ edge_service }}"
     state: restarted
-  when: not (reboot_host | bool)
+  when:
+    - not (reboot_host | bool)
+    - not (skip_restart | default(false) | bool)
 
 - name: Wait for SSH after reboot
   ansible.builtin.wait_for_connection:
     timeout: "{{ reboot_timeout }}"
-  when: reboot_host | bool
+  when:
+    - reboot_host | bool
+    - not (skip_restart | default(false) | bool)
 
 - name: Wait until the service unit is active
   ansible.builtin.systemd:
@@ -52,6 +70,7 @@
   until: edge_svc.status.ActiveState | default('') == 'active'
   retries: 40
   delay: 5
+  when: not (skip_restart | default(false) | bool)
 
 - name: Wait for service port
   ansible.builtin.wait_for:
@@ -86,6 +105,7 @@
   ansible.builtin.debug:
     msg: >-
       {{ inventory_hostname }} done —
+      skip_restart={{ skip_restart | default(false) }}
       service={{ edge_service }}
       port={{ edge_port }}
       http={{ edge_http.status | default('skipped') }}
