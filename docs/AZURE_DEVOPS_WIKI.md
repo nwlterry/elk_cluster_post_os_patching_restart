@@ -9,6 +9,8 @@ This page describes the **same-version OS-patch rolling restart** for the produc
 
 OS patches are applied by a separate process. This playbook only restarts (or health-checks) stack components in a safe order.
 
+**Indexing stays on.** The playbook does not stop ingest and does not call `POST /_flush`. `cluster.routing.allocation.enable=primaries` only blocks replica relocation; primaries keep accepting writes. Logstash / Fleet / APM keep running until their own step.
+
 ---
 
 ## Restart sequence (authoritative)
@@ -17,7 +19,7 @@ One host at a time (`serial: 1`, `order: inventory`).
 
 | Step | Play | Inventory group | Count | Action |
 |------|------|-----------------|-------|--------|
-| Pre | Pre-checks | localhost | — | Cluster must be **green**, inventory counts must match, live ES node count must be **16**. Optional: enable ML `upgrade_mode`, flush indices. |
+| Pre | Pre-checks | localhost | — | Cluster must be **green**, inventory counts must match, live ES node count must be **16**. Optional: enable ML `upgrade_mode`. **No flush. Indexing remains on.** |
 | 1/9 | Dedicated masters | `es_masters` | 3 | Reboot host or restart `elasticsearch`. No allocation disable. |
 | 2/9 | Data hot | `es_data_hot` | 6 | `allocation.enable=primaries` → reboot/restart → wait node in `_cat/nodes` → `allocation.enable=null` → wait **green** + no relocating/initializing. |
 | 3/9 | Data cold | `es_data_cold` | 5 | Same as hot. |
@@ -179,6 +181,7 @@ ansible-playbook playbooks/rolling_restart.yml -e reboot_host=false --ask-vault-
 
 - Apply OS patches
 - Take snapshots
+- Stop indexing or call `POST /_flush`
 - Call `PUT _nodes/{id}/shutdown` (ECE/ECK API)
 - Discover hosts from `_cat/nodes` or the OpenShift API
 - Restart OpenShift APM pods
