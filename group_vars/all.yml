@@ -65,15 +65,14 @@ ml_set_upgrade_mode: true
 # Do not call POST /_flush and do not stop ingest (Logstash/Fleet/APM stay up until their own step).
 
 # Stack monitoring (https://github.com/nwlterry/elk_stack_monitor)
-# Disable node-down / disk / built-in rules before the first reboot; re-enable after green.
+# Cluster-status rules (exact Kibana names from the JSON exports):
+#   elk_cluster_status-informational.json
+#   elk_cluster_status-warning.json
 mute_stack_monitoring: true
 mute_stack_monitoring_fail_on_error: false
 stack_monitor_rule_names:
-  - Elasticsearch Node Monitoring Alert
-  - Elasticsearch Node Down Alert
-  - Elasticsearch nodes changed
-  - Missing monitoring data
-  - Elasticsearch cluster status
+  - "CC | Elasticsearch | Cluster Status ( Informational )"
+  - "DevOps | Elasticsearch | Cluster Status ( Warning )"
 stack_monitor_mute_tags:
   - maintenance-mute
 
