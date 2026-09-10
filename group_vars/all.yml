@@ -5,10 +5,11 @@
 #   Data cold                 x 5
 #   ML                        x 2
 #   Fleet Server              x 2
-#   APM server (elastic-agent) x 2
+#   APM (OpenShift containers, check-only) x 2
 #   Logstash                  x 2
 #   Kibana                    x 2
-# Total: 16 Elasticsearch + 8 edge = 24 hosts
+# Total: 16 Elasticsearch + 8 edge inventory entries = 24
+# APM entries are not rebooted; they stay in inventory for port/HTTP checks.
 expected_topology:
   es_masters: 3
   es_data_hot: 6
@@ -39,6 +40,7 @@ es_ca_path: ""   # set to /etc/elasticsearch/certs/ca.crt if you validate TLS
 reboot_host: true                 # false = only restart the component service
 reboot_timeout: 900               # seconds to wait for SSH after reboot
 reboot_pre_delay: 15
+skip_restart: false               # per-host/group override; APM OpenShift set true
 
 # Cluster wait
 health_wait_status: green
@@ -75,7 +77,8 @@ fleet_scheme: https
 fleet_status_path: /api/status
 fleet_validate_certs: false
 
-# APM Server hosted by Elastic Agent (APM integration / standalone APM server)
+# APM Server hosted on OpenShift (containers). Playbook never reboots these.
+# ansible_host in inventory must be the Service/Route that answers on apm_port.
 apm_service: elastic-agent
 apm_port: 8200
 apm_scheme: http
