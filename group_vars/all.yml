@@ -5,7 +5,7 @@
 #   Data cold                 x 5
 #   ML                        x 2
 #   Fleet Server              x 2
-#   APM RHEL elastic-agent    x 2   (OS patch + restart)
+#   APM RHEL elastic-agent    x 2   (OS patch + host reboot)
 #   APM OpenShift containers  x 2   (check-only)
 #   Logstash                  x 2
 #   Kibana                    x 2
@@ -38,8 +38,9 @@ es_api_password: "{{ vault_es_api_password | default('changeme') }}"
 es_api_validate_certs: false
 es_ca_path: ""   # set to /etc/elasticsearch/certs/ca.crt if you validate TLS
 
-# What to do on each host after OS patching
-reboot_host: true                 # false = only restart the component service
+# OS patching requires a host reboot on every RHEL VM.
+# Only OpenShift APM (skip_restart) is exempt. Override with -e reboot_host=false for lab only.
+reboot_host: true
 reboot_timeout: 900               # seconds to wait for SSH after reboot
 reboot_pre_delay: 15
 skip_restart: false               # per-host/group override; apm_openshift set true
@@ -62,6 +63,19 @@ ml_set_upgrade_mode: true
 
 # Indexing stays on for this OS-patch rolling restart.
 # Do not call POST /_flush and do not stop ingest (Logstash/Fleet/APM stay up until their own step).
+
+# Stack monitoring (https://github.com/nwlterry/elk_stack_monitor)
+# Disable node-down / disk / built-in rules before the first reboot; re-enable after green.
+mute_stack_monitoring: true
+mute_stack_monitoring_fail_on_error: false
+stack_monitor_rule_names:
+  - Elasticsearch Node Monitoring Alert
+  - Elasticsearch Node Down Alert
+  - Elasticsearch nodes changed
+  - Missing monitoring data
+  - Elasticsearch cluster status
+stack_monitor_mute_tags:
+  - maintenance-mute
 
 # Optional safety gates before starting
 require_initial_green: true
@@ -96,9 +110,15 @@ logstash_scheme: http
 logstash_status_path: /?pretty
 logstash_validate_certs: false
 
-# Kibana
+# Kibana (UI + Alerting API for mute/unmute)
 kibana_service: kibana
 kibana_port: 5601
 kibana_scheme: https
 kibana_status_path: /api/status
 kibana_validate_certs: false
+kibana_api_scheme: "{{ kibana_scheme }}"
+kibana_api_host: kibana-01.devops.local
+kibana_api_port: "{{ kibana_port }}"
+kibana_api_user: "{{ es_api_user }}"
+kibana_api_password: "{{ es_api_password }}"
+kibana_api_validate_certs: "{{ kibana_validate_certs }}"
