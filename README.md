@@ -4,7 +4,7 @@ Ansible rolling restart for a self-managed Elastic Stack after monthly OS patchi
 
 https://github.com/nwlterry/elk_cluster_post_os_patching_restart
 
-Automates the official Elasticsearch rolling-restart procedure, then rolls Fleet Server, APM (Elastic Agent), Logstash, and Kibana one host at a time.
+Automates the official Elasticsearch rolling-restart procedure, then rolls Fleet Server, Logstash, and Kibana one host at a time. Both APM servers run as OpenShift containers and are **health-checked only** (no reboot, no systemd).
 
 ES data-node loop:
 
@@ -16,7 +16,7 @@ ES data-node loop:
 6. Wait for **green** and no relocating / initializing shards
 7. Next node
 
-Edge nodes wait for ES green, reboot/restart their own systemd unit, then wait for port + optional HTTP status.
+Edge nodes wait for ES green, reboot/restart their own systemd unit, then wait for port + optional HTTP status. Hosts with `skip_restart: true` skip reboot and systemd and only run the port/HTTP check (APM on OpenShift).
 
 Reference: [Full-cluster restart and rolling restart procedures](https://www.elastic.co/docs/deploy-manage/maintenance/start-stop-services/full-cluster-restart-rolling-restart-procedures)
 
@@ -29,7 +29,7 @@ Reference: [Full-cluster restart and rolling restart procedures](https://www.ela
 | Data cold | `es_data_cold` | 5 | `elasticsearch` | 9200 |
 | ML | `es_ml` | 2 | `elasticsearch` | 9200 |
 | Fleet Server | `fleet` | 2 | `elastic-agent` | 8220 |
-| APM server (elastic-agent) | `apm` | 2 | `elastic-agent` | 8200 |
+| APM (OpenShift container) | `apm` | 2 | n/a — check only | 8200 |
 | Logstash | `logstash` | 2 | `logstash` | 9600 |
 | Kibana | `kibana` | 2 | `kibana` | 5601 |
 | **Total** | | **16 ES + 8 edge = 24** | | |
@@ -47,7 +47,7 @@ Elastic dedicated-master-first start sequence, then ingest / UI that depend on a
 | 3 | `es_data_cold` | 5 | yes | Same |
 | 4 | `es_ml` | 2 | no | Jobs paused via `_ml/set_upgrade_mode` |
 | 5 | `fleet` | 2 | n/a | After ES green; agents enroll here |
-| 6 | `apm` | 2 | n/a | After Fleet so check-in works |
+| 6 | `apm` | 2 | n/a | OpenShift containers — port/HTTP check only |
 | 7 | `logstash` | 2 | n/a | Writes to ES; keep one up |
 | 8 | `kibana` | 2 | n/a | UI last |
 
@@ -56,7 +56,7 @@ Elastic dedicated-master-first start sequence, then ingest / UI that depend on a
 ```
 .
 ├── ansible.cfg
-├── inventories/production.yml          # edit hostnames / IPs
+├── inventories/production.yml          # edit hostnames / IPs / APM routes
 ├── group_vars/all.yml                  # topology, API, ports, timeouts
 ├── group_vars/vault.yml.example        # copy to vault.yml, then ansible-vault encrypt
 ├── playbooks/rolling_restart.yml
@@ -73,24 +73,25 @@ cd elk_cluster_post_os_patching_restart
 ## Before first run
 
 1. Fill in `inventories/production.yml` (`ansible_host`, `es_node_name` must match `node.name`).
-2. Set `es_api_host` in `group_vars/all.yml` to a VIP or a master that stays reachable.
-3. Store the password in Vault:
+2. For APM, set `ansible_host` to the OpenShift Service or Route that listens on `apm_port`. Those hosts use `ansible_connection: local` and `skip_restart: true`.
+3. Set `es_api_host` in `group_vars/all.yml` to a VIP or a master that stays reachable.
+4. Store the password in Vault:
 
 ```bash
 ansible-vault encrypt_string 'YOUR_PASSWORD' --name vault_es_api_password
 ```
 
-4. Confirm units are enabled so they come back after reboot:
+5. Confirm units are enabled so they come back after reboot (not applicable to OpenShift APM):
 
 ```bash
 systemctl is-enabled elasticsearch
-systemctl is-enabled elastic-agent    # Fleet Server + APM nodes
+systemctl is-enabled elastic-agent    # Fleet Server nodes
 systemctl is-enabled logstash
 systemctl is-enabled kibana
 ```
 
-5. If Fleet/APM are not using the `elastic-agent` unit name, set `fleet_service` / `apm_service` in `group_vars/all.yml`. If APM listens on a different port than 8200, set `apm_port`.
-6. Take a recent snapshot. Drop disk usage below the low watermark on any node that is close.
+6. If Fleet is not using the `elastic-agent` unit name, set `fleet_service` in `group_vars/all.yml`. If APM listens on a different port than 8200, set `apm_port`.
+7. Take a recent snapshot. Drop disk usage below the low watermark on any node that is close.
 
 ## Run
 
@@ -102,7 +103,7 @@ ansible-playbook playbooks/rolling_restart.yml -e reboot_host=false --ask-vault-
 # One tier
 ansible-playbook playbooks/rolling_restart.yml --tags hot --ask-vault-pass
 ansible-playbook playbooks/rolling_restart.yml --tags fleet --ask-vault-pass
-ansible-playbook playbooks/rolling_restart.yml --tags apm --ask-vault-pass
+ansible-playbook playbooks/rolling_restart.yml --tags apm --ask-vault-pass   # check only
 ansible-playbook playbooks/rolling_restart.yml --tags logstash --ask-vault-pass
 ansible-playbook playbooks/rolling_restart.yml --tags kibana --ask-vault-pass
 ansible-playbook playbooks/rolling_restart.yml --tags edge --ask-vault-pass
@@ -115,6 +116,7 @@ ansible-playbook playbooks/rolling_restart.yml --tags edge --ask-vault-pass
 - It does **not** apply the OS patches. Run the patch playbook first, then this.
 - It does **not** take snapshots.
 - It does **not** use the node shutdown API (`PUT _nodes/{id}/shutdown`). That API is documented for ECE/ECK, not self-managed operators.
+- It does **not** restart OpenShift APM pods. Set `skip_restart: true` (already set on the `apm` group).
 - Fleet / APM HTTP status checks treat `401` as “process is up” because those endpoints are often auth-gated.
 
 ## Tuning
@@ -127,6 +129,7 @@ ansible-playbook playbooks/rolling_restart.yml --tags edge --ask-vault-pass
 | `wait_for_no_relocating` | true | Do not start the next data node while shards are still moving |
 | `allocation_disable_value` | `primaries` | Official setting |
 | `fleet_port` / `apm_port` | 8220 / 8200 | Override if your policies differ |
+| `skip_restart` | false (true on `apm`) | Skip reboot/systemd; HTTP/port check only |
 
 ## Recovery if the playbook stops mid-way
 
