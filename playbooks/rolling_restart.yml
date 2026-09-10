@@ -1,5 +1,5 @@
 ---
-# Rolling OS-reboot / service restart for the full Elastic Stack.
+# Rolling OS-reboot for the full Elastic Stack after monthly OS patching.
 #
 # Official ES procedure:
 #   https://www.elastic.co/docs/deploy-manage/maintenance/start-stop-services/full-cluster-restart-rolling-restart-procedures
@@ -7,25 +7,24 @@
 # Indexing stays on. This playbook does not stop ingest and does not POST /_flush.
 # allocation.enable=primaries only blocks replica relocation; primaries still accept writes.
 #
+# Stack monitoring (nwlterry/elk_stack_monitor):
+#   precheck disables node-down / disk / tagged rules so Slack is quiet during reboot
+#   postcheck re-enables them after 16 ES nodes are green
+#
+# Every RHEL step reboots the host (reboot_host=true). OpenShift APM is check-only.
+#
 # Per data-bearing ES node:
-#   green -> allocation.enable=primaries -> reboot/restart -> node joins
+#   green -> allocation.enable=primaries -> reboot -> node joins
 #   -> allocation.enable=null -> wait green + no relocating/initializing -> next
 #
-# Current cluster:
-#   Master x 3 | Data Hot x 6 | Data Cold x 5 | ML x 2
-#   Fleet Server x 2
-#   APM RHEL elastic-agent x 2 | APM OpenShift elastic-agent x 2 (check-only)
-#   Logstash x 2 | Kibana x 2
-#
-# Start / restart order:
+# Start / reboot order:
 #   3 masters -> 6 hot -> 5 cold -> 2 ml -> 2 fleet
 #   -> 2 apm_rhel -> 2 apm_openshift (health check only)
 #   -> 2 logstash -> 2 kibana
 #
 #   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --ask-vault-pass
 #   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --tags precheck
-#   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --tags fleet,apm,logstash,kibana
-#   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml -e reboot_host=false
+#   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --tags unmute
 
 - name: Pre-checks - cluster must be healthy before first node
   hosts: localhost
@@ -161,8 +160,16 @@
         - ml_set_upgrade_mode | bool
         - ml_up.status | default(0) != 200
 
+    - name: Mute stack monitoring alerts for the OS-patch window
+      ansible.builtin.include_tasks:
+        file: tasks/mute_stack_monitoring.yml
+        apply:
+          tags: [monitoring, mute]
+      when: mute_stack_monitoring | bool
+      tags: [monitoring, mute]
 
-- name: 1/9 Dedicated master nodes (Elastic start-first)
+
+- name: 1/9 Dedicated master nodes (host reboot after OS patch)
   hosts: es_masters
   serial: 1
   any_errors_fatal: true
@@ -173,11 +180,12 @@
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
     is_data_node: false
+    reboot_host: true
   tasks:
     - ansible.builtin.include_tasks: tasks/restart_es_node.yml
 
 
-- name: 2/9 Data hot nodes
+- name: 2/9 Data hot nodes (host reboot after OS patch)
   hosts: es_data_hot
   serial: 1
   any_errors_fatal: true
@@ -188,11 +196,12 @@
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
     is_data_node: true
+    reboot_host: true
   tasks:
     - ansible.builtin.include_tasks: tasks/restart_es_node.yml
 
 
-- name: 3/9 Data cold nodes
+- name: 3/9 Data cold nodes (host reboot after OS patch)
   hosts: es_data_cold
   serial: 1
   any_errors_fatal: true
@@ -203,11 +212,12 @@
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
     is_data_node: true
+    reboot_host: true
   tasks:
     - ansible.builtin.include_tasks: tasks/restart_es_node.yml
 
 
-- name: 4/9 ML nodes
+- name: 4/9 ML nodes (host reboot after OS patch)
   hosts: es_ml
   serial: 1
   any_errors_fatal: true
@@ -218,11 +228,12 @@
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
     is_data_node: false
+    reboot_host: true
   tasks:
     - ansible.builtin.include_tasks: tasks/restart_es_node.yml
 
 
-- name: 5/9 Fleet Server nodes (after ES is green)
+- name: 5/9 Fleet Server nodes (host reboot after OS patch)
   hosts: fleet
   serial: 1
   any_errors_fatal: true
@@ -232,6 +243,7 @@
   tags: [edge, fleet]
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    reboot_host: true
     edge_service: "{{ fleet_service }}"
     edge_port: "{{ fleet_port }}"
     edge_status_url: "{{ fleet_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ fleet_port }}{{ fleet_status_path }}"
@@ -241,7 +253,7 @@
     - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
 
 
-- name: 6/9 APM on RHEL VMs (elastic-agent, OS patch restart)
+- name: 6/9 APM on RHEL VMs (host reboot after OS patch)
   hosts: apm_rhel
   serial: 1
   any_errors_fatal: true
@@ -251,6 +263,7 @@
   tags: [edge, apm, apm_rhel]
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    reboot_host: true
     skip_restart: false
     edge_service: "{{ apm_service }}"
     edge_port: "{{ apm_port }}"
@@ -282,7 +295,7 @@
     - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
 
 
-- name: 8/9 Logstash nodes
+- name: 8/9 Logstash nodes (host reboot after OS patch)
   hosts: logstash
   serial: 1
   any_errors_fatal: true
@@ -292,6 +305,7 @@
   tags: [edge, logstash]
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    reboot_host: true
     edge_service: "{{ logstash_service }}"
     edge_port: "{{ logstash_api_port }}"
     edge_status_url: "{{ logstash_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ logstash_api_port }}{{ logstash_status_path }}"
@@ -301,7 +315,7 @@
     - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
 
 
-- name: 9/9 Kibana nodes
+- name: 9/9 Kibana nodes (host reboot after OS patch)
   hosts: kibana
   serial: 1
   any_errors_fatal: true
@@ -311,6 +325,7 @@
   tags: [edge, kibana]
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    reboot_host: true
     edge_service: "{{ kibana_service }}"
     edge_port: "{{ kibana_port }}"
     edge_status_url: "{{ kibana_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ kibana_port }}{{ kibana_status_path }}"
@@ -390,3 +405,16 @@
           Rolling restart finished but status={{ final_h.json.status }}
           nodes={{ final_h.json.number_of_nodes }} (expected {{ expected_es_nodes }})
           unassigned={{ final_h.json.unassigned_shards }}
+
+
+- name: Re-enable stack monitoring alerts
+  hosts: localhost
+  gather_facts: false
+  tags: [postcheck, unmute, monitoring]
+  tasks:
+    - name: Unmute stack monitoring alerts after the cluster is back
+      ansible.builtin.include_tasks:
+        file: tasks/unmute_stack_monitoring.yml
+        apply:
+          tags: [postcheck, unmute, monitoring]
+      when: mute_stack_monitoring | bool
