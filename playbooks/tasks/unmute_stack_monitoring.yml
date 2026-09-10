@@ -1,0 +1,71 @@
+---
+# Re-enable Kibana alerting rules muted for the OS-patch window.
+# Wait for Kibana first — play 9/9 may have just rebooted both instances.
+
+- name: Kibana API base URL
+  ansible.builtin.set_fact:
+    kibana_api_url: "{{ kibana_api_scheme }}://{{ kibana_api_host }}:{{ kibana_api_port }}"
+
+- name: Wait for Kibana status before re-enabling alerts
+  ansible.builtin.uri:
+    url: "{{ kibana_api_url }}{{ kibana_status_path }}"
+    validate_certs: "{{ kibana_api_validate_certs }}"
+    status_code: [200]
+    timeout: 30
+  register: kbn_up
+  until: kbn_up.status | default(0) == 200
+  retries: 40
+  delay: 10
+  delegate_to: localhost
+  become: false
+  failed_when: false
+
+- name: Find Kibana alerting rules
+  ansible.builtin.uri:
+    url: "{{ kibana_api_url }}/api/alerting/rules/_find?page=1&per_page=100"
+    method: GET
+    user: "{{ kibana_api_user }}"
+    password: "{{ kibana_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ kibana_api_validate_certs }}"
+    headers:
+      kbn-xsrf: "true"
+      Content-Type: application/json
+    return_content: true
+    status_code: [200]
+  register: kbn_rules
+  delegate_to: localhost
+  become: false
+  failed_when: false
+  when: kbn_up.status | default(0) == 200
+
+- name: Warn if rules cannot be re-enabled
+  ansible.builtin.debug:
+    msg: >-
+      Kibana is not ready or rule lookup failed
+      (kibana={{ kbn_up.status | default('n/a') }},
+      find={{ kbn_rules.status | default('n/a') }}).
+      Re-run: ansible-playbook playbooks/rolling_restart.yml --tags unmute
+  when: kbn_up.status | default(0) != 200 or kbn_rules.status | default(0) != 200
+
+- name: Enable matching stack monitoring rules
+  ansible.builtin.uri:
+    url: "{{ kibana_api_url }}/api/alerting/rule/{{ item.id }}/_enable"
+    method: POST
+    user: "{{ kibana_api_user }}"
+    password: "{{ kibana_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ kibana_api_validate_certs }}"
+    headers:
+      kbn-xsrf: "true"
+    status_code: [200, 204]
+  loop: "{{ kbn_rules.json.data | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default(item.id) }}"
+  when:
+    - kbn_up.status | default(0) == 200
+    - kbn_rules.status | default(0) == 200
+    - item.name in stack_monitor_rule_names or ((item.tags | default([])) | intersect(stack_monitor_mute_tags) | length > 0)
+  delegate_to: localhost
+  become: false
+  failed_when: false
