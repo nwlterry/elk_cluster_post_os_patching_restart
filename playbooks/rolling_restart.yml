@@ -10,12 +10,14 @@
 #
 # Current cluster:
 #   Master x 3 | Data Hot x 6 | Data Cold x 5 | ML x 2
-#   Fleet Server x 2 | APM (OpenShift containers, check-only) x 2
+#   Fleet Server x 2
+#   APM RHEL elastic-agent x 2 | APM OpenShift elastic-agent x 2 (check-only)
 #   Logstash x 2 | Kibana x 2
 #
 # Start / restart order:
-#   3 masters -> 6 hot -> 5 cold -> 2 ml
-#   -> 2 fleet -> 2 apm (health check only) -> 2 logstash -> 2 kibana
+#   3 masters -> 6 hot -> 5 cold -> 2 ml -> 2 fleet
+#   -> 2 apm_rhel -> 2 apm_openshift (health check only)
+#   -> 2 logstash -> 2 kibana
 #
 #   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --ask-vault-pass
 #   ansible-playbook -i inventories/production.yml playbooks/rolling_restart.yml --tags precheck
@@ -98,6 +100,8 @@
           - groups['es_ml'] | length == expected_topology.es_ml
           - groups['fleet'] | length == expected_topology.fleet
           - groups['apm'] | length == expected_topology.apm
+          - groups['apm_rhel'] | length == expected_topology.apm_rhel
+          - groups['apm_openshift'] | length == expected_topology.apm_openshift
           - groups['logstash'] | length == expected_topology.logstash
           - groups['kibana'] | length == expected_topology.kibana
         fail_msg: >-
@@ -109,6 +113,8 @@
           ml={{ groups['es_ml'] | length }}
           fleet={{ groups['fleet'] | length }}
           apm={{ groups['apm'] | length }}
+          apm_rhel={{ groups['apm_rhel'] | length }}
+          apm_openshift={{ groups['apm_openshift'] | length }}
           logstash={{ groups['logstash'] | length }}
           kibana={{ groups['kibana'] | length }}
         success_msg: >-
@@ -118,6 +124,7 @@
           ml={{ expected_topology.es_ml }}
           fleet={{ expected_topology.fleet }}
           apm={{ expected_topology.apm }}
+          (rhel={{ expected_topology.apm_rhel }} ocp={{ expected_topology.apm_openshift }})
           logstash={{ expected_topology.logstash }}
           kibana={{ expected_topology.kibana }}
 
@@ -162,7 +169,7 @@
       when: do_flush | bool
 
 
-- name: 1/8 Dedicated master nodes (Elastic start-first)
+- name: 1/9 Dedicated master nodes (Elastic start-first)
   hosts: es_masters
   serial: 1
   any_errors_fatal: true
@@ -177,7 +184,7 @@
     - ansible.builtin.include_tasks: tasks/restart_es_node.yml
 
 
-- name: 2/8 Data hot nodes
+- name: 2/9 Data hot nodes
   hosts: es_data_hot
   serial: 1
   any_errors_fatal: true
@@ -192,7 +199,7 @@
     - ansible.builtin.include_tasks: tasks/restart_es_node.yml
 
 
-- name: 3/8 Data cold nodes
+- name: 3/9 Data cold nodes
   hosts: es_data_cold
   serial: 1
   any_errors_fatal: true
@@ -207,7 +214,7 @@
     - ansible.builtin.include_tasks: tasks/restart_es_node.yml
 
 
-- name: 4/8 ML nodes
+- name: 4/9 ML nodes
   hosts: es_ml
   serial: 1
   any_errors_fatal: true
@@ -222,7 +229,7 @@
     - ansible.builtin.include_tasks: tasks/restart_es_node.yml
 
 
-- name: 5/8 Fleet Server nodes (after ES is green)
+- name: 5/9 Fleet Server nodes (after ES is green)
   hosts: fleet
   serial: 1
   any_errors_fatal: true
@@ -241,14 +248,34 @@
     - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
 
 
-- name: 6/8 APM servers on OpenShift (health check only, no restart)
-  hosts: apm
+- name: 6/9 APM on RHEL VMs (elastic-agent, OS patch restart)
+  hosts: apm_rhel
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  order: inventory
+  tags: [edge, apm, apm_rhel]
+  vars:
+    es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
+    skip_restart: false
+    edge_service: "{{ apm_service }}"
+    edge_port: "{{ apm_port }}"
+    edge_status_url: "{{ apm_scheme }}://{{ ansible_host | default(inventory_hostname) }}:{{ apm_port }}{{ apm_status_path }}"
+    edge_validate_certs: "{{ apm_validate_certs }}"
+    edge_status_codes: [200, 401]
+  tasks:
+    - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
+
+
+- name: 7/9 APM on OpenShift (elastic-agent containers, health check only)
+  hosts: apm_openshift
   serial: 1
   any_errors_fatal: true
   become: false
   gather_facts: false
   order: inventory
-  tags: [edge, apm]
+  tags: [edge, apm, apm_openshift]
   vars:
     es_url: "{{ es_api_scheme }}://{{ es_api_host }}:{{ es_api_port }}"
     skip_restart: true
@@ -262,7 +289,7 @@
     - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
 
 
-- name: 7/8 Logstash nodes
+- name: 8/9 Logstash nodes
   hosts: logstash
   serial: 1
   any_errors_fatal: true
@@ -281,7 +308,7 @@
     - ansible.builtin.include_tasks: tasks/restart_edge_node.yml
 
 
-- name: 8/8 Kibana nodes
+- name: 9/9 Kibana nodes
   hosts: kibana
   serial: 1
   any_errors_fatal: true
