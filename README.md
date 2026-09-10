@@ -1,21 +1,36 @@
 # elk_cluster_post_os_patching_restart
 
-Ansible rolling **host reboot** for a self-managed Elastic Stack after monthly OS patching.
+Ansible rolling **host reboot** after monthly OS patching.
 
-https://github.com/nwlterry/elk_cluster_post_os_patching_restart
+- Playbook repo: https://github.com/nwlterry/elk_cluster_post_os_patching_restart
+- Rule repo: https://github.com/nwlterry/elk_stack_monitor
+- **ADO wiki page (paste this):** [docs/AZURE_DEVOPS_WIKI.md](docs/AZURE_DEVOPS_WIKI.md)
+- **Rule objects stored with that page:** [docs/objects/](docs/objects/)
 
-Cluster-status rules live in https://github.com/nwlterry/elk_stack_monitor:
+Indexing stays on. No `POST /_flush`. RHEL hosts reboot. OpenShift APM is check-only.
 
-- `elk_cluster_status-informational.json` → `CC | Elasticsearch | Cluster Status ( Informational )`
-- `elk_cluster_status-warning.json` → `DevOps | Elasticsearch | Cluster Status ( Warning )` (cluster **red**)
+## Required objects
 
-This playbook **disables** those Kibana rules before the first reboot and **enables** them again after all 16 ES nodes are green.
+| Kind | Object |
+|------|--------|
+| Playbook | `playbooks/rolling_restart.yml` |
+| Tasks | `restart_es_node.yml`, `restart_edge_node.yml`, `mute_stack_monitoring.yml`, `unmute_stack_monitoring.yml` |
+| Inventory | `inventories/production.yml` |
+| Vars | `group_vars/all.yml` |
+| Wiki | `docs/AZURE_DEVOPS_WIKI.md` |
+| Kibana rule (informational) | `docs/objects/elk_cluster_status-informational.json` |
+| Kibana rule (warning / red) | `docs/objects/elk_cluster_status-warning.json` |
 
-Two APM servers run as OpenShift `elastic-agent` containers and are **health-checked only** (no OS patch, no reboot).
+Same two JSON files exist in `elk_stack_monitor`.
 
-**Azure DevOps Server wiki source:** [docs/AZURE_DEVOPS_WIKI.md](docs/AZURE_DEVOPS_WIKI.md)
+### Kibana names that must match
 
-Indexing stays on. No `POST /_flush`.
+| File | Exact Kibana name |
+|------|-------------------|
+| `elk_cluster_status-informational.json` | `CC \| Elasticsearch \| Cluster Status ( Informational )` |
+| `elk_cluster_status-warning.json` | `DevOps \| Elasticsearch \| Cluster Status ( Warning )` |
+
+Mute by that name **or** tag `maintenance-mute`.
 
 ## Restart sequence
 
@@ -23,49 +38,19 @@ Indexing stays on. No `POST /_flush`.
 
 | Step | Group | Count | Action |
 |------|-------|-------|--------|
-| Pre | localhost | — | Green + 16 ES nodes; mute cluster-status rules |
+| Pre | localhost | — | Green + 16 ES nodes; mute the two cluster-status rules |
 | 1 | `es_masters` | 3 | **Reboot host** |
 | 2 | `es_data_hot` | 6 | Allocation disable, **reboot host**, wait green |
 | 3 | `es_data_cold` | 5 | Same as hot |
-| 4 | `es_ml` | 2 | **Reboot host**; jobs paused via `_ml/set_upgrade_mode` |
-| 5 | `fleet` | 2 | **Reboot host** (`elastic-agent`) |
-| 6 | `apm_rhel` | 2 | **Reboot host** (`elastic-agent`) |
-| 7 | `apm_openshift` | 2 | Port/HTTP check only — no OS patch |
+| 4 | `es_ml` | 2 | **Reboot host**; ML upgrade_mode |
+| 5 | `fleet` | 2 | **Reboot host** |
+| 6 | `apm_rhel` | 2 | **Reboot host** |
+| 7 | `apm_openshift` | 2 | Check only |
 | 8 | `logstash` | 2 | **Reboot host** |
 | 9 | `kibana` | 2 | **Reboot host** |
-| Post | localhost | — | Allocation on, ML jobs on, unmute alerts |
+| Post | localhost | — | Green + unmute rules |
 
-Every RHEL play sets `reboot_host: true` because OS patching requires a reboot. OpenShift APM is the only exception (`skip_restart: true`).
-
-## Stack monitoring
-
-Muted by exact Kibana name (`stack_monitor_rule_names`) or tag `maintenance-mute`:
-
-| File | Kibana name |
-|------|-------------|
-| `elk_cluster_status-informational.json` | `CC \| Elasticsearch \| Cluster Status ( Informational )` |
-| `elk_cluster_status-warning.json` | `DevOps \| Elasticsearch \| Cluster Status ( Warning )` |
-
-```bash
-ansible-playbook playbooks/rolling_restart.yml --tags unmute --ask-vault-pass
-```
-
-Set `kibana_api_host` in `group_vars/all.yml`.
-
-## Current cluster
-
-| Role | Inventory group | Count | Action |
-|------|-----------------|-------|--------|
-| Dedicated master | `es_masters` | 3 | reboot |
-| Data hot | `es_data_hot` | 6 | reboot |
-| Data cold | `es_data_cold` | 5 | reboot |
-| ML | `es_ml` | 2 | reboot |
-| Fleet Server | `fleet` | 2 | reboot |
-| APM RHEL VM | `apm_rhel` | 2 | reboot |
-| APM OpenShift container | `apm_openshift` | 2 | check only |
-| Logstash | `logstash` | 2 | reboot |
-| Kibana | `kibana` | 2 | reboot |
-| **Total** | | **16 ES + 10 edge = 26** | |
+16 ES + 10 edge = 26 inventory entries. Parent `apm` = 4.
 
 ## Run
 
@@ -75,9 +60,17 @@ ansible-playbook playbooks/rolling_restart.yml --ask-vault-pass
 ansible-playbook playbooks/rolling_restart.yml --tags unmute --ask-vault-pass
 ```
 
-## Recovery if the playbook stops mid-way
+Set `es_api_host` and `kibana_api_host` in `group_vars/all.yml`.
 
-1. Check `_cluster/health` and `_cluster/settings`. Clear `allocation.enable` if stuck on `primaries`.
-2. `POST _ml/set_upgrade_mode?enabled=false` if jobs are paused.
-3. Re-enable alerts: `--tags unmute`.
-4. Resume with `--tags hot --limit es-hot-04` (and so on).
+## ADO Wiki import
+
+1. Wiki → New page → title `ELK cluster post-OS-patching rolling restart`.
+2. Paste [docs/AZURE_DEVOPS_WIKI.md](docs/AZURE_DEVOPS_WIKI.md).
+3. Attach both files under `docs/objects/` to that page (or publish `docs/` as a code wiki).
+
+## Recovery
+
+1. Clear `cluster.routing.allocation.enable` if it is stuck on `primaries`.
+2. `POST _ml/set_upgrade_mode?enabled=false`
+3. `--tags unmute`
+4. Resume with `--tags hot --limit es-hot-04` (etc.).
